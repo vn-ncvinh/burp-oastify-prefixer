@@ -1,7 +1,7 @@
 package burp.oastify;
 
-import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.BurpExtension;
+import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.http.Http;
 import burp.api.montoya.http.handler.HttpHandler;
 import burp.api.montoya.http.handler.HttpRequestToBeSent;
@@ -24,15 +24,26 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * VCS Pentest - Oastify Prefixer
+ * - Thêm tab cấu hình prefix.
+ * - Thay thế domain *.oastify.com -> <prefix>*.oastify.com trong:
+ *   + Path: replace trực tiếp
+ *   + Query params: URL-decode -> replace -> URL-encode
+ *   + Body x-www-form-urlencoded: URL-decode -> replace -> URL-encode
+ *   + Header Cookie: URL-decode (name & value) -> replace -> URL-encode
+ *   + Header khác: replace trực tiếp trên giá trị
+ * - Không thay đổi HttpService (đích kết nối).
+ */
 public class OastifyPrefixerExtension implements BurpExtension, HttpHandler {
 
     private MontoyaApi api;
 
-    // Khớp cả “abc.oastify.com”, không phân biệt hoa thường.
+    // Khớp “abc.oastify.com”, không phân biệt hoa thường.
     private static final Pattern DOMAIN_PATTERN =
             Pattern.compile("([a-z0-9]+)\\.oastify\\.com", Pattern.CASE_INSENSITIVE);
 
-    // Prefix cấu hình ở tab
+    // Prefix cấu hình ở tab (mặc định)
     private volatile String currentPrefix = "vcspentest.";
 
     @Override
@@ -70,13 +81,13 @@ public class OastifyPrefixerExtension implements BurpExtension, HttpHandler {
         panel.add(prefixField, gc);
 
         gc.gridy++;
-        JLabel hint = new JLabel("Chuỗi này sẽ được thêm trước mọi domain khớp *.oastify.com (ví dụ: abc.oastify.com → <prefix>abc.oastify.com).");
+        JLabel hint = new JLabel("Sẽ thêm prefix trước mọi domain khớp *.oastify.com (vd: abc.oastify.com → <prefix>abc.oastify.com).");
         hint.setForeground(Color.DARK_GRAY);
         panel.add(hint, gc);
 
         gc.gridy++;
         JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
-        JButton resetBtn = new JButton("Reset về mặc định");
+        JButton resetBtn = new JButton("Reset mặc định");
         JLabel live = new JLabel("Đang dùng prefix: " + currentPrefix);
         row.add(resetBtn);
         row.add(live);
@@ -103,12 +114,12 @@ public class OastifyPrefixerExtension implements BurpExtension, HttpHandler {
         try {
             HttpRequest req = requestToBeSent;
 
-            // Lấy Content-Type gốc (trước khi mình sửa header) để quyết định cách xử lý body
+            // Lấy Content-Type gốc để quyết định xử lý body
             String originalContentType = getHeaderValue(req.headers(), "Content-Type");
 
             boolean changed = false;
 
-            // 1) Path + Query: query được decode -> replace -> encode
+            // 1) Path + Query: query decode -> replace -> encode; path replace trực tiếp
             String oldPath = req.path();
             String newPath = processPathAndQuery(oldPath, currentPrefix);
             if (!newPath.equals(oldPath)) {
@@ -116,14 +127,24 @@ public class OastifyPrefixerExtension implements BurpExtension, HttpHandler {
                 changed = true;
             }
 
-            // 2) Headers – replace trực tiếp trên header values
+            // 2) Headers
             List<HttpHeader> updated = new ArrayList<>();
             for (HttpHeader h : req.headers()) {
+                String name = h.name();
                 String oldVal = h.value();
-                String newVal = addPrefix(oldVal, currentPrefix);
+                String newVal;
+
+                if (name.equalsIgnoreCase("Cookie")) {
+                    // Cookie: decode -> replace -> encode cho từng cặp name=value
+                    newVal = processCookieHeader(oldVal, currentPrefix);
+                } else {
+                    // Header khác: replace trực tiếp trên giá trị
+                    newVal = addPrefix(oldVal, currentPrefix);
+                }
+
                 if (!newVal.equals(oldVal)) {
                     changed = true;
-                    updated.add(HttpHeader.httpHeader(h.name(), newVal));
+                    updated.add(HttpHeader.httpHeader(name, newVal));
                 } else {
                     updated.add(h);
                 }
@@ -136,10 +157,10 @@ public class OastifyPrefixerExtension implements BurpExtension, HttpHandler {
             String oldBody = req.bodyToString();
             String newBody;
             if (isFormUrlEncoded(originalContentType)) {
-                // application/x-www-form-urlencoded: decode -> replace -> encode như query
+                // Form: decode -> replace -> encode (giống query)
                 newBody = rebuildQueryWithDecodeReplace(oldBody, currentPrefix);
             } else {
-                // các loại body khác: replace trực tiếp
+                // Các loại khác: replace trực tiếp
                 newBody = addPrefix(oldBody, currentPrefix);
             }
             if (!newBody.equals(oldBody)) {
@@ -147,6 +168,7 @@ public class OastifyPrefixerExtension implements BurpExtension, HttpHandler {
                 changed = true;
             }
 
+            // Không thay đổi HttpService (đích kết nối).
             return RequestToBeSentAction.continueWith(req);
         } catch (Exception e) {
             api.logging().logToError("OastifyPrefixer error: " + e.getMessage());
@@ -175,11 +197,10 @@ public class OastifyPrefixerExtension implements BurpExtension, HttpHandler {
     private static boolean isFormUrlEncoded(String contentType) {
         if (contentType == null) return false;
         String ct = contentType.toLowerCase();
-        // Chấp nhận có tham số charset=... phía sau
         return ct.startsWith("application/x-www-form-urlencoded");
     }
 
-    // Path + query: path replace trực tiếp; query decode -> replace -> encode
+    /** Path + query: path replace trực tiếp; query decode -> replace -> encode. */
     private static String processPathAndQuery(String pathAndQuery, String prefix) {
         if (pathAndQuery == null || pathAndQuery.isEmpty()) return pathAndQuery;
 
@@ -206,7 +227,7 @@ public class OastifyPrefixerExtension implements BurpExtension, HttpHandler {
         return newPathOnly + "?" + newQuery + fragment;
     }
 
-    // Dùng chung cho query string & form urlencoded body
+    /** Dùng chung cho query string & body application/x-www-form-urlencoded. */
     private static String rebuildQueryWithDecodeReplace(String query, String prefix) {
         if (query == null || query.isEmpty()) return query;
 
@@ -246,18 +267,63 @@ public class OastifyPrefixerExtension implements BurpExtension, HttpHandler {
         return out.toString();
     }
 
+    /** Xử lý header Cookie: tách theo ';', với từng name=value: decode -> replace -> encode. */
+    private static String processCookieHeader(String cookieHeader, String prefix) {
+        if (cookieHeader == null || cookieHeader.isEmpty()) return cookieHeader;
+
+        String[] parts = cookieHeader.split(";");
+        StringBuilder out = new StringBuilder();
+
+        for (String p : parts) {
+            String part = p.trim();
+            if (part.isEmpty()) continue;
+
+            String name;
+            String value;
+            int eq = part.indexOf('=');
+            if (eq >= 0) {
+                name = part.substring(0, eq);
+                value = part.substring(eq + 1);
+            } else {
+                // Không có '=' — replace trực tiếp toàn bộ token
+                String replaced = addPrefix(part, prefix);
+                if (out.length() > 0) out.append("; ");
+                out.append(replaced);
+                continue;
+            }
+
+            boolean quoted = value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"");
+            String rawVal = quoted ? value.substring(1, value.length() - 1) : value;
+
+            // Decode -> replace -> encode cho name & value
+            String decName = safeUrlDecode(name);
+            String decVal  = safeUrlDecode(rawVal);
+
+            decName = addPrefix(decName, prefix);
+            decVal  = addPrefix(decVal,  prefix);
+
+            String encName = safeCookieEncode(decName);
+            String encVal  = safeCookieEncode(decVal);
+
+            if (out.length() > 0) out.append("; ");
+            out.append(encName).append("=").append(quoted ? "\"" + encVal + "\"" : encVal);
+        }
+
+        return out.toString();
+    }
+
+    /** URL-decode cho component query/form/cookie (dấu '+' -> space). */
     private static String safeUrlDecode(String s) {
         try {
-            // URLDecoder: '+' -> space; phù hợp với query/form
             return URLDecoder.decode(s, StandardCharsets.UTF_8.name());
         } catch (Exception ignored) {
             return s;
         }
     }
 
+    /** URL-encode cho component query/form (chuyển space thành %20 để tránh '+'). */
     private static String safeUrlEncode(String s) {
         try {
-            // URLEncoder cho component; chuẩn hoá space thành %20 (tránh '+')
             String enc = URLEncoder.encode(s, StandardCharsets.UTF_8.name());
             return enc.replace("+", "%20");
         } catch (Exception ignored) {
@@ -265,14 +331,24 @@ public class OastifyPrefixerExtension implements BurpExtension, HttpHandler {
         }
     }
 
-    // Thêm prefix vào mọi chuỗi khớp DOMAIN_PATTERN
+    /** URL-encode cho cookie component (giống safeUrlEncode). */
+    private static String safeCookieEncode(String s) {
+        try {
+            String enc = URLEncoder.encode(s, StandardCharsets.UTF_8.name());
+            return enc.replace("+", "%20");
+        } catch (Exception ignored) {
+            return s;
+        }
+    }
+
+    /** Thêm prefix vào mọi chuỗi khớp DOMAIN_PATTERN. */
     private static String addPrefix(String input, String prefix) {
         if (input == null || input.isEmpty()) return input;
         if (prefix == null) prefix = "";
         Matcher m = DOMAIN_PATTERN.matcher(input);
         StringBuffer sb = new StringBuffer();
         while (m.find()) {
-            String matched = m.group(0); // ví dụ: abc.oastify.com
+            String matched = m.group(0); // vd: abc.oastify.com
             String replacement = prefix + matched;
             m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
         }
