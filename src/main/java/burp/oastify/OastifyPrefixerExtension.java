@@ -41,7 +41,7 @@ public class OastifyPrefixerExtension implements BurpExtension, HttpHandler {
 
     // Khớp “abc.oastify.com”, không phân biệt hoa thường.
     private static final Pattern DOMAIN_PATTERN =
-            Pattern.compile("([a-z0-9]+)\\.oastify\\.com", Pattern.CASE_INSENSITIVE);
+            Pattern.compile("(?:[a-z0-9-]+\\.)?(?:oastify\\.com|oast\\.(?:pro|live|site|online|fun|me))", Pattern.CASE_INSENSITIVE);
 
     // Prefix cấu hình ở tab (mặc định)
     private volatile String currentPrefix = "vcspentest.";
@@ -81,7 +81,7 @@ public class OastifyPrefixerExtension implements BurpExtension, HttpHandler {
         panel.add(prefixField, gc);
 
         gc.gridy++;
-        JLabel hint = new JLabel("Sẽ thêm prefix trước mọi domain khớp *.oastify.com (vd: abc.oastify.com → <prefix>abc.oastify.com).");
+        JLabel hint = new JLabel("Sẽ thêm prefix trước mọi domain khớp *.oastify.com, oast.pro, oast.live, oast.site, oast.online, oast.fun, oast.me  (vd: abc.oastify.com → <prefix>abc.oastify.com).");
         hint.setForeground(Color.DARK_GRAY);
         panel.add(hint, gc);
 
